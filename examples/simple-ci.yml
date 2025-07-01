@@ -1,5 +1,9 @@
 # Simple CI Pipeline Example
 # Place this file in .github/workflows/ci.yml in your Go project
+# This is a simple CI pipeline that runs the following jobs:
+# - Lint: Runs the lint.yml workflow
+# - Test: Runs the build-and-test.yml workflow
+# - Security: Runs the security-scan.yml workflow
 
 name: Continuous Integration
 
