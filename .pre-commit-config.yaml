@@ -26,6 +26,6 @@ repos:
 
   # Custom commit message validation
   - repo: https://github.com/Gosayram/commit-mgmt
-    rev: v1.0.1
+    rev: v1.0.2
     hooks:
       - id: commit-msg-format
