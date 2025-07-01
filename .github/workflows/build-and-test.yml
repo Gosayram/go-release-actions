@@ -1,0 +1,180 @@
+name: "Build and Test Go Application"
+
+on:
+  workflow_call:
+    inputs:
+      go-version:
+        description: "Go version to use"
+        required: false
+        type: string
+        default: "1.21"
+      
+      working-directory:
+        description: "Working directory for Go commands"
+        required: false
+        type: string
+        default: "."
+      
+      test-timeout:
+        description: "Test timeout duration"
+        required: false
+        type: string
+        default: "10m"
+      
+      enable-coverage:
+        description: "Enable code coverage reporting"
+        required: false
+        type: boolean
+        default: true
+      
+      coverage-threshold:
+        description: "Minimum coverage threshold percentage"
+        required: false
+        type: number
+        default: 80
+      
+      cache-key-suffix:
+        description: "Additional suffix for cache key"
+        required: false
+        type: string
+        default: ""
+
+    outputs:
+      coverage-percentage:
+        description: "Code coverage percentage"
+        value: ${{ jobs.test.outputs.coverage }}
+      
+      build-status:
+        description: "Build status (success/failure)"
+        value: ${{ jobs.build.outputs.status }}
+
+env:
+  # Build and test configuration constants
+  GO_BUILD_FLAGS: "-v -race"
+  GO_TEST_FLAGS: "-v -race -coverprofile=coverage.out"
+  CACHE_VERSION: "v1"
+
+jobs:
+  build:
+    name: "Build Application"
+    runs-on: ubuntu-latest
+    outputs:
+      status: ${{ steps.build-status.outputs.status }}
+    
+    steps:
+      - name: "Checkout code"
+        uses: actions/checkout@v4
+      
+      - name: "Setup Go"
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ inputs.go-version }}
+          cache-dependency-path: ${{ inputs.working-directory }}/go.sum
+      
+      - name: "Cache Go modules"
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ env.CACHE_VERSION }}-${{ hashFiles('**/go.sum') }}-${{ inputs.cache-key-suffix }}
+          restore-keys: |
+            ${{ runner.os }}-go-${{ env.CACHE_VERSION }}-
+      
+      - name: "Download dependencies"
+        working-directory: ${{ inputs.working-directory }}
+        run: go mod download
+      
+      - name: "Verify dependencies"
+        working-directory: ${{ inputs.working-directory }}
+        run: go mod verify
+      
+      - name: "Build application"
+        working-directory: ${{ inputs.working-directory }}
+        run: go build ${{ env.GO_BUILD_FLAGS }} ./...
+      
+      - name: "Set build status"
+        id: build-status
+        run: echo "status=success" >> $GITHUB_OUTPUT
+
+  test:
+    name: "Run Tests"
+    runs-on: ubuntu-latest
+    needs: build
+    outputs:
+      coverage: ${{ steps.coverage.outputs.percentage }}
+    
+    steps:
+      - name: "Checkout code"
+        uses: actions/checkout@v4
+      
+      - name: "Setup Go"
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ inputs.go-version }}
+          cache-dependency-path: ${{ inputs.working-directory }}/go.sum
+      
+      - name: "Cache Go modules"
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ env.CACHE_VERSION }}-${{ hashFiles('**/go.sum') }}-${{ inputs.cache-key-suffix }}
+          restore-keys: |
+            ${{ runner.os }}-go-${{ env.CACHE_VERSION }}-
+      
+      - name: "Download dependencies"
+        working-directory: ${{ inputs.working-directory }}
+        run: go mod download
+      
+      - name: "Run tests"
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          timeout ${{ inputs.test-timeout }} go test ${{ env.GO_TEST_FLAGS }} ./...
+      
+      - name: "Calculate coverage"
+        if: ${{ inputs.enable-coverage }}
+        id: coverage
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          if [ -f coverage.out ]; then
+            COVERAGE=$(go tool cover -func=coverage.out | grep total | awk '{print $3}' | sed 's/%//')
+            echo "percentage=${COVERAGE}" >> $GITHUB_OUTPUT
+            echo "Coverage: ${COVERAGE}%"
+            
+            # Check coverage threshold
+            if (( $(echo "${COVERAGE} < ${{ inputs.coverage-threshold }}" | bc -l) )); then
+              echo "Coverage ${COVERAGE}% is below threshold ${{ inputs.coverage-threshold }}%"
+              exit 1
+            fi
+          else
+            echo "No coverage file found"
+            echo "percentage=0" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: "Upload coverage reports"
+        if: ${{ inputs.enable-coverage }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: ${{ inputs.working-directory }}/coverage.out
+          retention-days: 30
+
+  validate:
+    name: "Validate Build"
+    runs-on: ubuntu-latest
+    needs: [build, test]
+    
+    steps:
+      - name: "Check build and test results"
+        run: |
+          echo "Build Status: ${{ needs.build.outputs.status }}"
+          echo "Coverage: ${{ needs.test.outputs.coverage }}%"
+          
+          if [ "${{ needs.build.outputs.status }}" != "success" ]; then
+            echo "Build failed"
+            exit 1
+          fi
+          
+          echo "Build and test validation completed successfully" 

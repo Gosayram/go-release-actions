@@ -1,0 +1,258 @@
+name: "Release Go Application"
+
+on:
+  workflow_call:
+    inputs:
+      go-version:
+        description: "Go version to use"
+        required: false
+        type: string
+        default: "1.21"
+      
+      working-directory:
+        description: "Working directory for Go commands"
+        required: false
+        type: string
+        default: "."
+      
+      app-name:
+        description: "Application name for binary files"
+        required: true
+        type: string
+      
+      build-platforms:
+        description: "Platforms to build for (JSON array format)"
+        required: false
+        type: string
+        default: '["linux/amd64", "linux/arm64", "darwin/amd64", "darwin/arm64", "windows/amd64"]'
+      
+      enable-checksums:
+        description: "Generate checksums for release artifacts"
+        required: false
+        type: boolean
+        default: true
+      
+      create-release:
+        description: "Create GitHub release"
+        required: false
+        type: boolean
+        default: true
+      
+      prerelease:
+        description: "Mark release as prerelease"
+        required: false
+        type: boolean
+        default: false
+      
+      draft:
+        description: "Create release as draft"
+        required: false
+        type: boolean
+        default: false
+
+    outputs:
+      release-url:
+        description: "URL of the created release"
+        value: ${{ jobs.release.outputs.url }}
+      
+      release-tag:
+        description: "Tag of the created release"
+        value: ${{ jobs.release.outputs.tag }}
+
+    secrets:
+      release-token:
+        description: "GitHub token with release permissions"
+        required: false
+
+env:
+  # Release configuration constants
+  BUILD_FLAGS: "-ldflags=-s -w"
+  CHECKSUM_FILE: "checksums.txt"
+  ARTIFACT_RETENTION_DAYS: 90
+
+jobs:
+  build:
+    name: "Build Cross-Platform Binaries"
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include: ${{ fromJSON(inputs.build-platforms) }}
+    
+    steps:
+      - name: "Checkout code"
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: "Setup Go"
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ inputs.go-version }}
+          cache-dependency-path: ${{ inputs.working-directory }}/go.sum
+      
+      - name: "Parse platform"
+        id: platform
+        run: |
+          GOOS=$(echo "${{ matrix.include }}" | cut -d'/' -f1)
+          GOARCH=$(echo "${{ matrix.include }}" | cut -d'/' -f2)
+          echo "goos=${GOOS}" >> $GITHUB_OUTPUT
+          echo "goarch=${GOARCH}" >> $GITHUB_OUTPUT
+          
+          # Set binary extension for Windows
+          if [ "${GOOS}" = "windows" ]; then
+            echo "extension=.exe" >> $GITHUB_OUTPUT
+          else
+            echo "extension=" >> $GITHUB_OUTPUT
+          fi
+          
+          echo "filename=${{ inputs.app-name }}-${GOOS}-${GOARCH}${{ steps.platform.outputs.extension }}" >> $GITHUB_OUTPUT
+      
+      - name: "Build binary"
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          GOOS: ${{ steps.platform.outputs.goos }}
+          GOARCH: ${{ steps.platform.outputs.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          go build ${{ env.BUILD_FLAGS }} -o "${{ steps.platform.outputs.filename }}" ./...
+      
+      - name: "Upload binary artifact"
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ steps.platform.outputs.goos }}-${{ steps.platform.outputs.goarch }}
+          path: ${{ inputs.working-directory }}/${{ steps.platform.outputs.filename }}
+          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
+
+  checksums:
+    name: "Generate Checksums"
+    runs-on: ubuntu-latest
+    needs: build
+    if: ${{ inputs.enable-checksums }}
+    
+    steps:
+      - name: "Download all artifacts"
+        uses: actions/download-artifact@v4
+        with:
+          pattern: binary-*
+          merge-multiple: true
+      
+      - name: "Generate checksums"
+        run: |
+          for file in ${{ inputs.app-name }}-*; do
+            if [ -f "$file" ]; then
+              sha256sum "$file" >> ${{ env.CHECKSUM_FILE }}
+            fi
+          done
+          
+          echo "Generated checksums:"
+          cat ${{ env.CHECKSUM_FILE }}
+      
+      - name: "Upload checksums"
+        uses: actions/upload-artifact@v4
+        with:
+          name: checksums
+          path: ${{ env.CHECKSUM_FILE }}
+          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
+
+  release:
+    name: "Create GitHub Release"
+    runs-on: ubuntu-latest
+    needs: [build, checksums]
+    if: ${{ inputs.create-release && always() && needs.build.result == 'success' }}
+    outputs:
+      url: ${{ steps.create-release.outputs.html_url }}
+      tag: ${{ steps.get-tag.outputs.tag }}
+    
+    steps:
+      - name: "Checkout code"
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: "Get release tag"
+        id: get-tag
+        run: |
+          if [ "${{ github.event_name }}" = "push" ] && [[ "${{ github.ref }}" =~ refs/tags/ ]]; then
+            TAG=${GITHUB_REF#refs/tags/}
+          else
+            TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.1.0")
+          fi
+          echo "tag=${TAG}" >> $GITHUB_OUTPUT
+          echo "Release tag: ${TAG}"
+      
+      - name: "Download all artifacts"
+        uses: actions/download-artifact@v4
+        with:
+          pattern: "*"
+          merge-multiple: true
+      
+      - name: "Prepare release assets"
+        run: |
+          mkdir -p release-assets
+          
+          # Move binaries to release assets
+          for file in ${{ inputs.app-name }}-*; do
+            if [ -f "$file" ] && [ "$file" != "${{ env.CHECKSUM_FILE }}" ]; then
+              mv "$file" release-assets/
+            fi
+          done
+          
+          # Move checksums if available
+          if [ -f "${{ env.CHECKSUM_FILE }}" ]; then
+            mv "${{ env.CHECKSUM_FILE }}" release-assets/
+          fi
+          
+          echo "Release assets prepared:"
+          ls -la release-assets/
+      
+      - name: "Generate changelog"
+        id: changelog
+        run: |
+          if [ -f "CHANGELOG.md" ]; then
+            # Extract changelog for current version
+            awk '/^## \['"${{ steps.get-tag.outputs.tag }}"'\]/{flag=1; next} /^## \[/{flag=0} flag' CHANGELOG.md > changelog.txt
+            if [ -s changelog.txt ]; then
+              echo "changelog-file=changelog.txt" >> $GITHUB_OUTPUT
+            else
+              echo "changelog-file=" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "changelog-file=" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: "Create GitHub Release"
+        id: create-release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.release-token || secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ steps.get-tag.outputs.tag }}
+          release_name: Release ${{ steps.get-tag.outputs.tag }}
+          body_path: ${{ steps.changelog.outputs.changelog-file }}
+          draft: ${{ inputs.draft }}
+          prerelease: ${{ inputs.prerelease }}
+      
+      - name: "Upload release assets"
+        run: |
+          for file in release-assets/*; do
+            if [ -f "$file" ]; then
+              filename=$(basename "$file")
+              echo "Uploading: $filename"
+              
+              curl -L \
+                -X POST \
+                -H "Accept: application/vnd.github+json" \
+                -H "Authorization: Bearer ${{ secrets.release-token || secrets.GITHUB_TOKEN }}" \
+                -H "X-GitHub-Api-Version: 2022-11-28" \
+                -H "Content-Type: application/octet-stream" \
+                "${{ steps.create-release.outputs.upload_url }}?name=$filename" \
+                --data-binary "@$file"
+            fi
+          done
+      
+      - name: "Release summary"
+        run: |
+          echo "Release created successfully!"
+          echo "Tag: ${{ steps.get-tag.outputs.tag }}"
+          echo "URL: ${{ steps.create-release.outputs.html_url }}"
+          echo "Assets uploaded: $(ls -1 release-assets/ | wc -l)" 

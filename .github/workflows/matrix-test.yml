@@ -1,0 +1,289 @@
+name: "Matrix Testing"
+
+on:
+  workflow_call:
+    inputs:
+      go-versions:
+        description: "JSON array of Go versions to test"
+        required: false
+        type: string
+        default: '["1.21", "1.22", "1.23"]'
+      
+      operating-systems:
+        description: "JSON array of operating systems to test"
+        required: false
+        type: string
+        default: '["ubuntu-latest", "macos-latest", "windows-latest"]'
+      
+      working-directory:
+        description: "Working directory for Go commands"
+        required: false
+        type: string
+        default: "."
+      
+      test-timeout:
+        description: "Test timeout duration"
+        required: false
+        type: string
+        default: "10m"
+      
+      enable-race-detection:
+        description: "Enable race detection in tests"
+        required: false
+        type: boolean
+        default: true
+      
+      enable-benchmarks:
+        description: "Run benchmark tests"
+        required: false
+        type: boolean
+        default: false
+      
+      benchmark-time:
+        description: "Duration for benchmark tests"
+        required: false
+        type: string
+        default: "1s"
+      
+      extra-test-args:
+        description: "Additional arguments for go test"
+        required: false
+        type: string
+        default: ""
+
+    outputs:
+      matrix-status:
+        description: "Overall matrix test status (success/failure)"
+        value: ${{ jobs.summary.outputs.status }}
+      
+      failed-combinations:
+        description: "Number of failed test combinations"
+        value: ${{ jobs.summary.outputs.failed-combinations }}
+
+env:
+  # Matrix testing configuration constants
+  CACHE_VERSION: "v1"
+  GO_TEST_FLAGS: "-v"
+  RACE_FLAG: "-race"
+  BENCHMARK_FLAG: "-bench=."
+
+jobs:
+  matrix-test:
+    name: "Test Go ${{ matrix.go-version }} on ${{ matrix.os }}"
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        go-version: ${{ fromJSON(inputs.go-versions) }}
+        os: ${{ fromJSON(inputs.operating-systems) }}
+    
+    steps:
+      - name: "Checkout code"
+        uses: actions/checkout@v4
+      
+      - name: "Setup Go ${{ matrix.go-version }}"
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go-version }}
+          cache-dependency-path: ${{ inputs.working-directory }}/go.sum
+      
+      - name: "Cache Go modules"
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ matrix.go-version }}-${{ env.CACHE_VERSION }}-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-${{ matrix.go-version }}-${{ env.CACHE_VERSION }}-
+            ${{ runner.os }}-go-${{ matrix.go-version }}-
+      
+      - name: "Download dependencies"
+        working-directory: ${{ inputs.working-directory }}
+        run: go mod download
+      
+      - name: "Verify dependencies"
+        working-directory: ${{ inputs.working-directory }}
+        run: go mod verify
+      
+      - name: "Build application"
+        working-directory: ${{ inputs.working-directory }}
+        run: go build ${{ env.GO_TEST_FLAGS }} ./...
+      
+      - name: "Run tests without race detection"
+        if: ${{ !inputs.enable-race-detection }}
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          timeout ${{ inputs.test-timeout }} go test ${{ env.GO_TEST_FLAGS }} ${{ inputs.extra-test-args }} ./...
+      
+      - name: "Run tests with race detection"
+        if: ${{ inputs.enable-race-detection }}
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          timeout ${{ inputs.test-timeout }} go test ${{ env.GO_TEST_FLAGS }} ${{ env.RACE_FLAG }} ${{ inputs.extra-test-args }} ./...
+      
+      - name: "Run benchmark tests"
+        if: ${{ inputs.enable-benchmarks }}
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          go test ${{ env.BENCHMARK_FLAG }} -benchtime=${{ inputs.benchmark-time }} ${{ inputs.extra-test-args }} ./... || true
+      
+      - name: "Upload test results"
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ matrix.go-version }}-${{ matrix.os }}
+          path: ${{ inputs.working-directory }}/*.out
+          retention-days: 7
+        continue-on-error: true
+
+  compatibility-test:
+    name: "Go Version Compatibility"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        go-version: ${{ fromJSON(inputs.go-versions) }}
+    
+    steps:
+      - name: "Checkout code"
+        uses: actions/checkout@v4
+      
+      - name: "Setup Go ${{ matrix.go-version }}"
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go-version }}
+          cache-dependency-path: ${{ inputs.working-directory }}/go.sum
+      
+      - name: "Check Go modules compatibility"
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          echo "Testing Go modules compatibility with Go ${{ matrix.go-version }}"
+          go mod download
+          go mod verify
+          go list -m all
+      
+      - name: "Check build compatibility"
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          echo "Testing build compatibility with Go ${{ matrix.go-version }}"
+          go build ./...
+      
+      - name: "Check vet compatibility"
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          echo "Running go vet with Go ${{ matrix.go-version }}"
+          go vet ./...
+
+  cross-compile-test:
+    name: "Cross Compilation Test"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        go-version: ${{ fromJSON(inputs.go-versions) }}
+        target: 
+          - GOOS=linux GOARCH=amd64
+          - GOOS=linux GOARCH=arm64
+          - GOOS=darwin GOARCH=amd64
+          - GOOS=darwin GOARCH=arm64
+          - GOOS=windows GOARCH=amd64
+    
+    steps:
+      - name: "Checkout code"
+        uses: actions/checkout@v4
+      
+      - name: "Setup Go ${{ matrix.go-version }}"
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go-version }}
+          cache-dependency-path: ${{ inputs.working-directory }}/go.sum
+      
+      - name: "Cross compile test"
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          CGO_ENABLED: 0
+        run: |
+          echo "Cross compiling with Go ${{ matrix.go-version }} for ${{ matrix.target }}"
+          export ${{ matrix.target }}
+          go build ./...
+
+  summary:
+    name: "Matrix Test Summary"
+    runs-on: ubuntu-latest
+    needs: [matrix-test, compatibility-test, cross-compile-test]
+    if: always()
+    outputs:
+      status: ${{ steps.summary.outputs.status }}
+      failed-combinations: ${{ steps.summary.outputs.failed-combinations }}
+    
+    steps:
+      - name: "Calculate matrix test results"
+        id: summary
+        run: |
+          echo "Matrix Test Summary"
+          echo "=================="
+          
+          TOTAL_JOBS=0
+          FAILED_JOBS=0
+          
+          # Count matrix test results
+          MATRIX_RESULTS='${{ toJSON(needs.matrix-test.result) }}'
+          COMPAT_RESULTS='${{ toJSON(needs.compatibility-test.result) }}'
+          CROSS_RESULTS='${{ toJSON(needs.cross-compile-test.result) }}'
+          
+          echo "Matrix Test Results: ${MATRIX_RESULTS}"
+          echo "Compatibility Test Results: ${COMPAT_RESULTS}"
+          echo "Cross Compile Results: ${CROSS_RESULTS}"
+          
+          # Check matrix-test results
+          if [ "${MATRIX_RESULTS}" != "success" ]; then
+            FAILED_JOBS=$((FAILED_JOBS + 1))
+            echo "Matrix tests failed"
+          fi
+          TOTAL_JOBS=$((TOTAL_JOBS + 1))
+          
+          # Check compatibility-test results
+          if [ "${COMPAT_RESULTS}" != "success" ]; then
+            FAILED_JOBS=$((FAILED_JOBS + 1))
+            echo "Compatibility tests failed"
+          fi
+          TOTAL_JOBS=$((TOTAL_JOBS + 1))
+          
+          # Check cross-compile-test results
+          if [ "${CROSS_RESULTS}" != "success" ]; then
+            FAILED_JOBS=$((FAILED_JOBS + 1))
+            echo "Cross compilation tests failed"
+          fi
+          TOTAL_JOBS=$((TOTAL_JOBS + 1))
+          
+          echo "failed-combinations=${FAILED_JOBS}" >> $GITHUB_OUTPUT
+          
+          echo ""
+          echo "Summary:"
+          echo "Total job categories: ${TOTAL_JOBS}"
+          echo "Failed job categories: ${FAILED_JOBS}"
+          echo "Success rate: $(( (TOTAL_JOBS - FAILED_JOBS) * 100 / TOTAL_JOBS ))%"
+          
+          if [ ${FAILED_JOBS} -eq 0 ]; then
+            echo "status=success" >> $GITHUB_OUTPUT
+            echo "All matrix tests passed successfully!"
+          else
+            echo "status=failure" >> $GITHUB_OUTPUT
+            echo "Some matrix tests failed. ${FAILED_JOBS} out of ${TOTAL_JOBS} job categories failed."
+            exit 1
+          fi
+      
+      - name: "Test matrix summary table"
+        run: |
+          echo "## Matrix Test Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Test Type | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Matrix Tests | ${{ needs.matrix-test.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Compatibility Tests | ${{ needs.compatibility-test.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Cross Compilation | ${{ needs.cross-compile-test.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Go Versions:** ${{ inputs.go-versions }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Operating Systems:** ${{ inputs.operating-systems }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Failed Combinations:** ${{ steps.summary.outputs.failed-combinations }}" >> $GITHUB_STEP_SUMMARY 

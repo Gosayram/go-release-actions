@@ -1,0 +1,338 @@
+name: "Security Scan"
+
+on:
+  workflow_call:
+    inputs:
+      go-version:
+        description: "Go version to use"
+        required: false
+        type: string
+        default: "1.21"
+      
+      working-directory:
+        description: "Working directory for Go commands"
+        required: false
+        type: string
+        default: "."
+      
+      enable-gosec:
+        description: "Enable Gosec security scanner"
+        required: false
+        type: boolean
+        default: true
+      
+      enable-nancy:
+        description: "Enable Nancy vulnerability scanner"
+        required: false
+        type: boolean
+        default: true
+      
+      enable-trivy:
+        description: "Enable Trivy vulnerability scanner"
+        required: false
+        type: boolean
+        default: true
+      
+      enable-codeql:
+        description: "Enable CodeQL security analysis"
+        required: false
+        type: boolean
+        default: true
+      
+      gosec-severity:
+        description: "Minimum severity level for Gosec (low, medium, high)"
+        required: false
+        type: string
+        default: "medium"
+      
+      trivy-severity:
+        description: "Severity levels for Trivy scan (UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL)"
+        required: false
+        type: string
+        default: "HIGH,CRITICAL"
+      
+      fail-on-vulnerability:
+        description: "Fail the workflow if vulnerabilities are found"
+        required: false
+        type: boolean
+        default: true
+
+    outputs:
+      security-status:
+        description: "Overall security scan status (success/failure)"
+        value: ${{ jobs.summary.outputs.status }}
+      
+      vulnerabilities-count:
+        description: "Total number of vulnerabilities found"
+        value: ${{ jobs.summary.outputs.vulnerabilities }}
+
+env:
+  # Security scan configuration constants
+  GOSEC_VERSION: "2.18.2"
+  NANCY_VERSION: "1.0.42"
+  TRIVY_VERSION: "0.48.1"
+  SCAN_TIMEOUT: "10m"
+
+jobs:
+  gosec-scan:
+    name: "Gosec Security Scan"
+    runs-on: ubuntu-latest
+    if: ${{ inputs.enable-gosec }}
+    
+    steps:
+      - name: "Checkout code"
+        uses: actions/checkout@v4
+      
+      - name: "Setup Go"
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ inputs.go-version }}
+          cache-dependency-path: ${{ inputs.working-directory }}/go.sum
+      
+      - name: "Install Gosec"
+        run: |
+          go install github.com/securecodewarrior/gosec/v2/cmd/gosec@v${{ env.GOSEC_VERSION }}
+      
+      - name: "Run Gosec scan"
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          echo "Running Gosec security scan with severity: ${{ inputs.gosec-severity }}"
+          gosec -severity ${{ inputs.gosec-severity }} -fmt json -out gosec-report.json -stdout ./...
+          
+          # Also generate human-readable output
+          gosec -severity ${{ inputs.gosec-severity }} -fmt text ./... || true
+      
+      - name: "Upload Gosec report"
+        uses: actions/upload-artifact@v4
+        with:
+          name: gosec-security-report
+          path: ${{ inputs.working-directory }}/gosec-report.json
+          retention-days: 30
+
+  nancy-scan:
+    name: "Nancy Vulnerability Scan"
+    runs-on: ubuntu-latest
+    if: ${{ inputs.enable-nancy }}
+    
+    steps:
+      - name: "Checkout code"
+        uses: actions/checkout@v4
+      
+      - name: "Setup Go"
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ inputs.go-version }}
+          cache-dependency-path: ${{ inputs.working-directory }}/go.sum
+      
+      - name: "Install Nancy"
+        run: |
+          curl -L -o nancy https://github.com/sonatypecommunity/nancy/releases/download/v${{ env.NANCY_VERSION }}/nancy-v${{ env.NANCY_VERSION }}-linux-amd64
+          chmod +x nancy
+          sudo mv nancy /usr/local/bin/
+      
+      - name: "Generate dependency list"
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          go list -json -deps ./... | nancy sleuth > nancy-report.txt
+      
+      - name: "Display Nancy results"
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          echo "Nancy vulnerability scan results:"
+          cat nancy-report.txt || true
+      
+      - name: "Upload Nancy report"
+        uses: actions/upload-artifact@v4
+        with:
+          name: nancy-vulnerability-report
+          path: ${{ inputs.working-directory }}/nancy-report.txt
+          retention-days: 30
+
+  trivy-scan:
+    name: "Trivy Vulnerability Scan"
+    runs-on: ubuntu-latest
+    if: ${{ inputs.enable-trivy }}
+    
+    steps:
+      - name: "Checkout code"
+        uses: actions/checkout@v4
+      
+      - name: "Install Trivy"
+        run: |
+          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+          echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee -a /etc/apt/sources.list.d/trivy.list
+          sudo apt-get update
+          sudo apt-get install -y trivy=${{ env.TRIVY_VERSION }}*
+      
+      - name: "Run Trivy filesystem scan"
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          echo "Running Trivy filesystem scan with severity: ${{ inputs.trivy-severity }}"
+          trivy fs --severity ${{ inputs.trivy-severity }} --format json --output trivy-fs-report.json .
+          
+          # Also generate human-readable output
+          trivy fs --severity ${{ inputs.trivy-severity }} . || true
+      
+      - name: "Upload Trivy report"
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-vulnerability-report
+          path: ${{ inputs.working-directory }}/trivy-fs-report.json
+          retention-days: 30
+
+  codeql-analysis:
+    name: "CodeQL Security Analysis"
+    runs-on: ubuntu-latest
+    if: ${{ inputs.enable-codeql }}
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    
+    steps:
+      - name: "Checkout code"
+        uses: actions/checkout@v4
+      
+      - name: "Initialize CodeQL"
+        uses: github/codeql-action/init@v3
+        with:
+          languages: go
+          queries: security-extended,security-and-quality
+      
+      - name: "Setup Go"
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ inputs.go-version }}
+          cache-dependency-path: ${{ inputs.working-directory }}/go.sum
+      
+      - name: "Autobuild"
+        uses: github/codeql-action/autobuild@v3
+      
+      - name: "Perform CodeQL Analysis"
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:go"
+
+  dependency-review:
+    name: "Dependency Review"
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
+      pull-requests: write
+    
+    steps:
+      - name: "Checkout code"
+        uses: actions/checkout@v4
+      
+      - name: "Dependency Review"
+        uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
+          allow-licenses: Apache-2.0, MIT, BSD-3-Clause, BSD-2-Clause, ISC, 0BSD
+
+  summary:
+    name: "Security Scan Summary"
+    runs-on: ubuntu-latest
+    needs: [gosec-scan, nancy-scan, trivy-scan, codeql-analysis]
+    if: always()
+    outputs:
+      status: ${{ steps.summary.outputs.status }}
+      vulnerabilities: ${{ steps.summary.outputs.vulnerabilities }}
+    
+    steps:
+      - name: "Download scan reports"
+        uses: actions/download-artifact@v4
+        with:
+          pattern: "*-report*"
+          merge-multiple: true
+        continue-on-error: true
+      
+      - name: "Analyze security scan results"
+        id: summary
+        run: |
+          echo "Security Scan Summary"
+          echo "===================="
+          
+          TOTAL_VULNERABILITIES=0
+          FAILED_SCANS=0
+          
+          # Check Gosec results
+          if [ "${{ inputs.enable-gosec }}" = "true" ]; then
+            GOSEC_RESULT="${{ needs.gosec-scan.result }}"
+            echo "Gosec Scan: ${GOSEC_RESULT}"
+            
+            if [ -f "gosec-report.json" ]; then
+              GOSEC_ISSUES=$(jq '.Issues | length' gosec-report.json 2>/dev/null || echo "0")
+              echo "Gosec found ${GOSEC_ISSUES} security issues"
+              TOTAL_VULNERABILITIES=$((TOTAL_VULNERABILITIES + GOSEC_ISSUES))
+            fi
+            
+            if [ "${GOSEC_RESULT}" = "failure" ]; then
+              FAILED_SCANS=$((FAILED_SCANS + 1))
+            fi
+          fi
+          
+          # Check Nancy results
+          if [ "${{ inputs.enable-nancy }}" = "true" ]; then
+            NANCY_RESULT="${{ needs.nancy-scan.result }}"
+            echo "Nancy Scan: ${NANCY_RESULT}"
+            
+            if [ -f "nancy-report.txt" ]; then
+              NANCY_VULNS=$(grep -c "vulnerable" nancy-report.txt 2>/dev/null || echo "0")
+              echo "Nancy found ${NANCY_VULNS} vulnerable dependencies"
+              TOTAL_VULNERABILITIES=$((TOTAL_VULNERABILITIES + NANCY_VULNS))
+            fi
+            
+            if [ "${NANCY_RESULT}" = "failure" ]; then
+              FAILED_SCANS=$((FAILED_SCANS + 1))
+            fi
+          fi
+          
+          # Check Trivy results
+          if [ "${{ inputs.enable-trivy }}" = "true" ]; then
+            TRIVY_RESULT="${{ needs.trivy-scan.result }}"
+            echo "Trivy Scan: ${TRIVY_RESULT}"
+            
+            if [ -f "trivy-fs-report.json" ]; then
+              TRIVY_VULNS=$(jq '[.Results[]?.Vulnerabilities // [] | length] | add // 0' trivy-fs-report.json 2>/dev/null || echo "0")
+              echo "Trivy found ${TRIVY_VULNS} vulnerabilities"
+              TOTAL_VULNERABILITIES=$((TOTAL_VULNERABILITIES + TRIVY_VULNS))
+            fi
+            
+            if [ "${TRIVY_RESULT}" = "failure" ]; then
+              FAILED_SCANS=$((FAILED_SCANS + 1))
+            fi
+          fi
+          
+          # Check CodeQL results
+          if [ "${{ inputs.enable-codeql }}" = "true" ]; then
+            CODEQL_RESULT="${{ needs.codeql-analysis.result }}"
+            echo "CodeQL Analysis: ${CODEQL_RESULT}"
+            
+            if [ "${CODEQL_RESULT}" = "failure" ]; then
+              FAILED_SCANS=$((FAILED_SCANS + 1))
+            fi
+          fi
+          
+          echo "vulnerabilities=${TOTAL_VULNERABILITIES}" >> $GITHUB_OUTPUT
+          
+          echo ""
+          echo "Summary:"
+          echo "Total vulnerabilities found: ${TOTAL_VULNERABILITIES}"
+          echo "Failed scans: ${FAILED_SCANS}"
+          
+          if [ ${TOTAL_VULNERABILITIES} -eq 0 ] && [ ${FAILED_SCANS} -eq 0 ]; then
+            echo "status=success" >> $GITHUB_OUTPUT
+            echo "All security scans passed successfully!"
+          else
+            echo "status=failure" >> $GITHUB_OUTPUT
+            echo "Security issues detected!"
+            
+            if [ "${{ inputs.fail-on-vulnerability }}" = "true" ]; then
+              echo "Failing workflow due to security vulnerabilities"
+              exit 1
+            else
+              echo "Continuing despite security vulnerabilities"
+            fi
+          fi 

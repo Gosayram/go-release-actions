@@ -1,0 +1,220 @@
+name: "Auto Tag on Version Change"
+
+on:
+  workflow_call:
+    inputs:
+      version-file:
+        description: "Path to version file"
+        required: false
+        type: string
+        default: ".release-version"
+      
+      tag-prefix:
+        description: "Prefix for tags (e.g., 'v' for v1.0.0)"
+        required: false
+        type: string
+        default: "v"
+      
+      branch:
+        description: "Branch to monitor for version changes"
+        required: false
+        type: string
+        default: "main"
+      
+      create-release:
+        description: "Create GitHub release when tagging"
+        required: false
+        type: boolean
+        default: true
+      
+      release-draft:
+        description: "Create release as draft"
+        required: false
+        type: boolean
+        default: false
+      
+      release-prerelease:
+        description: "Mark release as prerelease"
+        required: false
+        type: boolean
+        default: false
+
+    outputs:
+      tag-created:
+        description: "Whether a new tag was created"
+        value: ${{ jobs.auto-tag.outputs.tag-created }}
+      
+      new-tag:
+        description: "The new tag that was created"
+        value: ${{ jobs.auto-tag.outputs.new-tag }}
+      
+      previous-tag:
+        description: "The previous tag"
+        value: ${{ jobs.auto-tag.outputs.previous-tag }}
+
+    secrets:
+      github-token:
+        description: "GitHub token with repository write permissions"
+        required: false
+
+env:
+  # Auto-tagging configuration constants
+  DEFAULT_BRANCH: "main"
+  VERSION_PATTERN: "^[0-9]+\\.[0-9]+\\.[0-9]+.*$"
+
+jobs:
+  auto-tag:
+    name: "Auto Tag Version"
+    runs-on: ubuntu-latest
+    if: github.ref == format('refs/heads/{0}', inputs.branch)
+    outputs:
+      tag-created: ${{ steps.tag-check.outputs.tag-created }}
+      new-tag: ${{ steps.tag-check.outputs.new-tag }}
+      previous-tag: ${{ steps.tag-check.outputs.previous-tag }}
+    
+    steps:
+      - name: "Checkout code"
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.github-token || secrets.GITHUB_TOKEN }}
+      
+      - name: "Check version file exists"
+        id: version-file-check
+        run: |
+          if [ -f "${{ inputs.version-file }}" ]; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "Version file found: ${{ inputs.version-file }}"
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "Version file not found: ${{ inputs.version-file }}"
+          fi
+      
+      - name: "Read current version"
+        if: steps.version-file-check.outputs.exists == 'true'
+        id: current-version
+        run: |
+          CURRENT_VERSION=$(cat "${{ inputs.version-file }}" | tr -d '[:space:]')
+          echo "version=${CURRENT_VERSION}" >> $GITHUB_OUTPUT
+          echo "Current version: ${CURRENT_VERSION}"
+          
+          # Validate version format
+          if echo "${CURRENT_VERSION}" | grep -E "${{ env.VERSION_PATTERN }}" > /dev/null; then
+            echo "valid=true" >> $GITHUB_OUTPUT
+            echo "Version format is valid"
+          else
+            echo "valid=false" >> $GITHUB_OUTPUT
+            echo "Invalid version format: ${CURRENT_VERSION}"
+            exit 1
+          fi
+      
+      - name: "Get latest tag"
+        id: latest-tag
+        run: |
+          LATEST_TAG=$(git tag -l "${{ inputs.tag-prefix }}*" | sort -V | tail -n1)
+          if [ -z "$LATEST_TAG" ]; then
+            echo "No existing tags found"
+            echo "tag=" >> $GITHUB_OUTPUT
+            echo "version=" >> $GITHUB_OUTPUT
+          else
+            echo "tag=${LATEST_TAG}" >> $GITHUB_OUTPUT
+            # Remove prefix to get version
+            LATEST_VERSION=${LATEST_TAG#${{ inputs.tag-prefix }}}
+            echo "version=${LATEST_VERSION}" >> $GITHUB_OUTPUT
+            echo "Latest tag: ${LATEST_TAG} (version: ${LATEST_VERSION})"
+          fi
+      
+      - name: "Compare versions and create tag"
+        if: steps.version-file-check.outputs.exists == 'true' && steps.current-version.outputs.valid == 'true'
+        id: tag-check
+        run: |
+          CURRENT_VERSION="${{ steps.current-version.outputs.version }}"
+          LATEST_VERSION="${{ steps.latest-tag.outputs.version }}"
+          NEW_TAG="${{ inputs.tag-prefix }}${CURRENT_VERSION}"
+          
+          echo "previous-tag=${{ steps.latest-tag.outputs.tag }}" >> $GITHUB_OUTPUT
+          
+          # If no previous tags or version has changed
+          if [ -z "$LATEST_VERSION" ] || [ "$CURRENT_VERSION" != "$LATEST_VERSION" ]; then
+            echo "Version changed from '${LATEST_VERSION}' to '${CURRENT_VERSION}'"
+            echo "Creating new tag: ${NEW_TAG}"
+            
+            # Create and push tag
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git tag -a "${NEW_TAG}" -m "Release ${NEW_TAG}"
+            git push origin "${NEW_TAG}"
+            
+            echo "tag-created=true" >> $GITHUB_OUTPUT
+            echo "new-tag=${NEW_TAG}" >> $GITHUB_OUTPUT
+            
+            echo "Tag ${NEW_TAG} created successfully"
+          else
+            echo "Version unchanged (${CURRENT_VERSION})"
+            echo "tag-created=false" >> $GITHUB_OUTPUT
+            echo "new-tag=" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: "Generate changelog"
+        if: steps.tag-check.outputs.tag-created == 'true' && inputs.create-release
+        id: changelog
+        run: |
+          NEW_TAG="${{ steps.tag-check.outputs.new-tag }}"
+          PREVIOUS_TAG="${{ steps.tag-check.outputs.previous-tag }}"
+          
+          echo "Generating changelog for ${NEW_TAG}"
+          
+          if [ -f "CHANGELOG.md" ]; then
+            # Extract changelog section for current version
+            awk "/^## \\[$(echo ${NEW_TAG#${{ inputs.tag-prefix }}} | sed 's/[]\/$*.^|[]/\\&/g')\\]/{flag=1; next} /^## \\[/{flag=0} flag" CHANGELOG.md > release-notes.md
+            
+            if [ -s release-notes.md ]; then
+              echo "Using CHANGELOG.md for release notes"
+              echo "changelog-file=release-notes.md" >> $GITHUB_OUTPUT
+            else
+              echo "No changelog entry found for ${NEW_TAG}, generating from commits"
+            fi
+          fi
+          
+          # If no changelog file or empty, generate from git commits
+          if [ ! -f "release-notes.md" ] || [ ! -s "release-notes.md" ]; then
+            echo "## Changes" > release-notes.md
+            echo "" >> release-notes.md
+            
+            if [ -n "$PREVIOUS_TAG" ]; then
+              echo "Changes since ${PREVIOUS_TAG}:" >> release-notes.md
+              echo "" >> release-notes.md
+              git log --pretty=format:"- %s (%h)" "${PREVIOUS_TAG}..HEAD" >> release-notes.md
+            else
+              echo "Initial release" >> release-notes.md
+              echo "" >> release-notes.md
+              git log --pretty=format:"- %s (%h)" >> release-notes.md
+            fi
+            
+            echo "changelog-file=release-notes.md" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: "Create GitHub Release"
+        if: steps.tag-check.outputs.tag-created == 'true' && inputs.create-release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.github-token || secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ steps.tag-check.outputs.new-tag }}
+          release_name: Release ${{ steps.tag-check.outputs.new-tag }}
+          body_path: ${{ steps.changelog.outputs.changelog-file }}
+          draft: ${{ inputs.release-draft }}
+          prerelease: ${{ inputs.release-prerelease }}
+      
+      - name: "Summary"
+        run: |
+          echo "Auto-tag workflow completed"
+          echo "========================="
+          echo "Tag created: ${{ steps.tag-check.outputs.tag-created }}"
+          if [ "${{ steps.tag-check.outputs.tag-created }}" = "true" ]; then
+            echo "New tag: ${{ steps.tag-check.outputs.new-tag }}"
+            echo "Previous tag: ${{ steps.tag-check.outputs.previous-tag }}"
+            if [ "${{ inputs.create-release }}" = "true" ]; then
+              echo "GitHub release created"
+            fi
+          fi 

@@ -1,0 +1,302 @@
+name: "Lint Go Code"
+
+on:
+  workflow_call:
+    inputs:
+      go-version:
+        description: "Go version to use"
+        required: false
+        type: string
+        default: "1.21"
+      
+      working-directory:
+        description: "Working directory for Go commands"
+        required: false
+        type: string
+        default: "."
+      
+      golangci-lint-version:
+        description: "golangci-lint version to use"
+        required: false
+        type: string
+        default: "v1.55.2"
+      
+      enable-fmt-check:
+        description: "Enable go fmt check"
+        required: false
+        type: boolean
+        default: true
+      
+      enable-vet-check:
+        description: "Enable go vet check"
+        required: false
+        type: boolean
+        default: true
+      
+      enable-mod-check:
+        description: "Enable go mod tidy check"
+        required: false
+        type: boolean
+        default: true
+      
+      enable-staticcheck:
+        description: "Enable staticcheck"
+        required: false
+        type: boolean
+        default: true
+      
+      golangci-config-file:
+        description: "Path to golangci-lint config file"
+        required: false
+        type: string
+        default: ".golangci.yml"
+      
+      fail-on-warnings:
+        description: "Fail on linter warnings"
+        required: false
+        type: boolean
+        default: false
+
+    outputs:
+      lint-status:
+        description: "Overall lint status (success/failure)"
+        value: ${{ jobs.summary.outputs.status }}
+      
+      issues-count:
+        description: "Total number of issues found"
+        value: ${{ jobs.summary.outputs.issues }}
+
+env:
+  # Linting configuration constants
+  STATICCHECK_VERSION: "2023.1.6"
+  CACHE_VERSION: "v1"
+  MAX_ISSUES_COUNT: 100
+
+jobs:
+  format-check:
+    name: "Check Code Formatting"
+    runs-on: ubuntu-latest
+    if: ${{ inputs.enable-fmt-check }}
+    
+    steps:
+      - name: "Checkout code"
+        uses: actions/checkout@v4
+      
+      - name: "Setup Go"
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ inputs.go-version }}
+      
+      - name: "Check formatting"
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "Unformatted files found:"
+            echo "$unformatted"
+            echo "Run 'go fmt ./...' to fix formatting issues"
+            exit 1
+          fi
+          echo "All files are properly formatted"
+
+  vet-check:
+    name: "Go Vet Analysis"
+    runs-on: ubuntu-latest
+    if: ${{ inputs.enable-vet-check }}
+    
+    steps:
+      - name: "Checkout code"
+        uses: actions/checkout@v4
+      
+      - name: "Setup Go"
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ inputs.go-version }}
+          cache-dependency-path: ${{ inputs.working-directory }}/go.sum
+      
+      - name: "Download dependencies"
+        working-directory: ${{ inputs.working-directory }}
+        run: go mod download
+      
+      - name: "Run go vet"
+        working-directory: ${{ inputs.working-directory }}
+        run: go vet ./...
+
+  mod-check:
+    name: "Go Modules Check"
+    runs-on: ubuntu-latest
+    if: ${{ inputs.enable-mod-check }}
+    
+    steps:
+      - name: "Checkout code"
+        uses: actions/checkout@v4
+      
+      - name: "Setup Go"
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ inputs.go-version }}
+          cache-dependency-path: ${{ inputs.working-directory }}/go.sum
+      
+      - name: "Check go mod tidy"
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          cp go.mod go.mod.orig
+          cp go.sum go.sum.orig
+          go mod tidy
+          
+          if ! diff -u go.mod.orig go.mod; then
+            echo "go.mod is not tidy. Run 'go mod tidy' to fix"
+            exit 1
+          fi
+          
+          if ! diff -u go.sum.orig go.sum; then
+            echo "go.sum is not tidy. Run 'go mod tidy' to fix"
+            exit 1
+          fi
+          
+          echo "go.mod and go.sum are tidy"
+
+  staticcheck:
+    name: "Staticcheck Analysis"
+    runs-on: ubuntu-latest
+    if: ${{ inputs.enable-staticcheck }}
+    
+    steps:
+      - name: "Checkout code"
+        uses: actions/checkout@v4
+      
+      - name: "Setup Go"
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ inputs.go-version }}
+          cache-dependency-path: ${{ inputs.working-directory }}/go.sum
+      
+      - name: "Install staticcheck"
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@${{ env.STATICCHECK_VERSION }}
+      
+      - name: "Run staticcheck"
+        working-directory: ${{ inputs.working-directory }}
+        run: staticcheck ./...
+
+  golangci-lint:
+    name: "GolangCI-Lint Analysis"
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: "Checkout code"
+        uses: actions/checkout@v4
+      
+      - name: "Setup Go"
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ inputs.go-version }}
+          cache-dependency-path: ${{ inputs.working-directory }}/go.sum
+      
+      - name: "Cache golangci-lint"
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/golangci-lint
+          key: ${{ runner.os }}-golangci-lint-${{ env.CACHE_VERSION }}-${{ inputs.golangci-lint-version }}
+          restore-keys: |
+            ${{ runner.os }}-golangci-lint-${{ env.CACHE_VERSION }}-
+      
+      - name: "Install golangci-lint"
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(go env GOPATH)/bin ${{ inputs.golangci-lint-version }}
+      
+      - name: "Check for config file"
+        id: config-check
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          if [ -f "${{ inputs.golangci-config-file }}" ]; then
+            echo "config-exists=true" >> $GITHUB_OUTPUT
+            echo "Using config file: ${{ inputs.golangci-config-file }}"
+          else
+            echo "config-exists=false" >> $GITHUB_OUTPUT
+            echo "No config file found, using default settings"
+          fi
+      
+      - name: "Run golangci-lint with config"
+        if: steps.config-check.outputs.config-exists == 'true'
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          if [ "${{ inputs.fail-on-warnings }}" = "true" ]; then
+            golangci-lint run --config="${{ inputs.golangci-config-file }}" --max-issues-per-linter=0 --max-same-issues=0
+          else
+            golangci-lint run --config="${{ inputs.golangci-config-file }}" --max-issues-per-linter=0 --max-same-issues=0 || true
+          fi
+      
+      - name: "Run golangci-lint with defaults"
+        if: steps.config-check.outputs.config-exists == 'false'
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          if [ "${{ inputs.fail-on-warnings }}" = "true" ]; then
+            golangci-lint run --enable-all --disable=exhaustivestruct,exhaustruct,gochecknoglobals,gochecknoinits,gomnd,paralleltest,testpackage,wsl --max-issues-per-linter=0 --max-same-issues=0
+          else
+            golangci-lint run --enable-all --disable=exhaustivestruct,exhaustruct,gochecknoglobals,gochecknoinits,gomnd,paralleltest,testpackage,wsl --max-issues-per-linter=0 --max-same-issues=0 || true
+          fi
+
+  summary:
+    name: "Lint Summary"
+    runs-on: ubuntu-latest
+    needs: [format-check, vet-check, mod-check, staticcheck, golangci-lint]
+    if: always()
+    outputs:
+      status: ${{ steps.summary.outputs.status }}
+      issues: ${{ steps.summary.outputs.issues }}
+    
+    steps:
+      - name: "Calculate summary"
+        id: summary
+        run: |
+          # Check results of all jobs
+          FORMAT_RESULT="${{ needs.format-check.result }}"
+          VET_RESULT="${{ needs.vet-check.result }}"
+          MOD_RESULT="${{ needs.mod-check.result }}"
+          STATIC_RESULT="${{ needs.staticcheck.result }}"
+          GOLANGCI_RESULT="${{ needs.golangci-lint.result }}"
+          
+          echo "Job Results:"
+          echo "Format Check: ${FORMAT_RESULT}"
+          echo "Vet Check: ${VET_RESULT}"
+          echo "Mod Check: ${MOD_RESULT}"
+          echo "Staticcheck: ${STATIC_RESULT}"
+          echo "GolangCI-Lint: ${GOLANGCI_RESULT}"
+          
+          # Count failures
+          FAILED_JOBS=0
+          
+          if [ "${{ inputs.enable-fmt-check }}" = "true" ] && [ "${FORMAT_RESULT}" = "failure" ]; then
+            FAILED_JOBS=$((FAILED_JOBS + 1))
+          fi
+          
+          if [ "${{ inputs.enable-vet-check }}" = "true" ] && [ "${VET_RESULT}" = "failure" ]; then
+            FAILED_JOBS=$((FAILED_JOBS + 1))
+          fi
+          
+          if [ "${{ inputs.enable-mod-check }}" = "true" ] && [ "${MOD_RESULT}" = "failure" ]; then
+            FAILED_JOBS=$((FAILED_JOBS + 1))
+          fi
+          
+          if [ "${{ inputs.enable-staticcheck }}" = "true" ] && [ "${STATIC_RESULT}" = "failure" ]; then
+            FAILED_JOBS=$((FAILED_JOBS + 1))
+          fi
+          
+          if [ "${GOLANGCI_RESULT}" = "failure" ]; then
+            FAILED_JOBS=$((FAILED_JOBS + 1))
+          fi
+          
+          echo "issues=${FAILED_JOBS}" >> $GITHUB_OUTPUT
+          
+          if [ ${FAILED_JOBS} -eq 0 ]; then
+            echo "status=success" >> $GITHUB_OUTPUT
+            echo "All lint checks passed successfully!"
+          else
+            echo "status=failure" >> $GITHUB_OUTPUT
+            echo "Lint checks failed. ${FAILED_JOBS} job(s) failed."
+            
+            if [ "${{ inputs.fail-on-warnings }}" = "true" ]; then
+              exit 1
+            fi
+          fi 
