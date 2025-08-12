@@ -81,7 +81,7 @@ jobs:
     
     steps:
       - name: "Checkout code"
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
       
       - name: "Setup Go"
         uses: actions/setup-go@v5
@@ -116,7 +116,7 @@ jobs:
     
     steps:
       - name: "Checkout code"
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
       
       - name: "Setup Go"
         uses: actions/setup-go@v5
@@ -155,7 +155,7 @@ jobs:
     
     steps:
       - name: "Checkout code"
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
       
       - name: "Install Trivy"
         run: |
@@ -191,7 +191,7 @@ jobs:
     
     steps:
       - name: "Checkout code"
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
       
       - name: "Initialize CodeQL"
         uses: github/codeql-action/init@v3
@@ -223,7 +223,7 @@ jobs:
     
     steps:
       - name: "Checkout code"
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
       
       - name: "Dependency Review"
         uses: actions/dependency-review-action@v4
