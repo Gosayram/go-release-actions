@@ -103,7 +103,7 @@ jobs:
           gosec -severity ${{ inputs.gosec-severity }} -fmt text ./... || true
       
       - name: "Upload Gosec report"
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: gosec-security-report
           path: ${{ inputs.working-directory }}/gosec-report.json
@@ -142,7 +142,7 @@ jobs:
           cat nancy-report.txt || true
       
       - name: "Upload Nancy report"
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: nancy-vulnerability-report
           path: ${{ inputs.working-directory }}/nancy-report.txt
@@ -174,7 +174,7 @@ jobs:
           trivy fs --severity ${{ inputs.trivy-severity }} . || true
       
       - name: "Upload Trivy report"
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: trivy-vulnerability-report
           path: ${{ inputs.working-directory }}/trivy-fs-report.json
