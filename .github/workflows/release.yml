@@ -117,7 +117,7 @@ jobs:
           go build ${{ env.BUILD_FLAGS }} -o "${{ steps.platform.outputs.filename }}" ./...
       
       - name: "Upload binary artifact"
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: binary-${{ steps.platform.outputs.goos }}-${{ steps.platform.outputs.goarch }}
           path: ${{ inputs.working-directory }}/${{ steps.platform.outputs.filename }}
@@ -148,7 +148,7 @@ jobs:
           cat ${{ env.CHECKSUM_FILE }}
       
       - name: "Upload checksums"
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: checksums
           path: ${{ env.CHECKSUM_FILE }}
